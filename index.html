@@ -139,6 +139,12 @@ input:focus,select:focus{outline:2px solid var(--blue);outline-offset:-1px}
       <div class="sub" id="mktSrc" style="margin-top:6px">—</div>
     </div>
     <div id="sigBox"></div>
+    <div class="card" id="liveCard"><div class="ttl"><span>Live read</span><span class="pill p-grey" id="lrClock">—</span></div><div id="lrBody" class="note" style="margin-top:0">Loading…</div></div>
+    <div class="card" id="aiCard">
+      <div class="ttl"><span>Claude AI analysis</span><span class="sub" id="aiMeta"></span></div>
+      <div id="aiBody" class="note" style="margin-top:0">Ask Claude for a second opinion on this chart right now.</div>
+      <button class="btn pri" id="aiBtn" style="width:100%;margin-top:8px">✦ Ask Claude AI</button>
+    </div>
     <div class="card">
       <div class="ttl"><span id="chTitle">Chart</span><span class="sub" id="chPrice">—</span></div>
       <div class="chartfig"><canvas id="mktCv"></canvas></div>
@@ -194,6 +200,15 @@ input:focus,select:focus{outline:2px solid var(--blue);outline-offset:-1px}
       <div class="note">Exness defaults: gold 100 oz, silver 5,000 oz, BTC 1, ETH 1. Check your symbol's contract specification in MT5 if lots look wrong.</div>
     </div>
     <div class="card">
+      <div class="ttl">Claude AI</div>
+      <div class="g2">
+        <div class="f full"><label>Anthropic API key</label><input type="password" id="setAiKey" autocomplete="off" placeholder="sk-ant-..."></div>
+        <div class="f"><label>Model</label><select id="setAiModel"><option value="claude-haiku-5-5">Haiku 5.5 — fastest, cheapest</option><option value="claude-sonnet-5-5">Sonnet 5.5 — recommended</option><option value="claude-opus-5-5">Opus 5.5 — deepest, most expensive</option></select></div>
+        <div class="f"><label>Auto-analyse</label><select id="setAiAuto"><option value="off">Off — only when I tap</option><option value="close">Every candle close (costs more)</option></select></div>
+      </div>
+      <div class="note">Get a key at console.anthropic.com → API keys, and set a monthly spend limit there. The key is stored only on this phone, is sent only to Anthropic, and is never included in backups. Anyone using this phone could see it.</div>
+    </div>
+    <div class="card">
       <div class="ttl">Data</div>
       <div class="g2">
         <button class="btn pri" id="importBtn">⇧ Import EA journal</button>
@@ -234,9 +249,10 @@ const SYMS = {
   BTC:{name:'Bitcoin',label:'BTCUSD', tested:false, src:[['spot','BTCUSDT'],['fapi','BTCUSDT']], dp:1},
   ETH:{name:'Ethereum',label:'ETHUSD',tested:false, src:[['spot','ETHUSDT'],['fapi','ETHUSDT']], dp:2}
 };
-const TFS = {M5:'5m',M15:'15m',H1:'1h',H4:'4h',D1:'1d'};
+const TFS = {M1:'1m',M5:'5m',M15:'15m',H1:'1h',H4:'4h',D1:'1d'};
+const TF_SEC = {M1:60,M5:300,M15:900,H1:3600,H4:14400,D1:86400};
 const DEF = {deposit:3000, goal:10000, days:22, start:'', mode:'catch', risk:1.5, dll:3, maxT:3, stop:10, comm:7,
-             planSym:'XAU', lotMode:'auto', fixedLot:0.01, contract:{XAU:100, XAG:5000, BTC:1, ETH:1}};
+             planSym:'XAU', lotMode:'auto', fixedLot:0.01, aiKey:'', aiModel:'claude-sonnet-5-5', aiAuto:'off', contract:{XAU:100, XAG:5000, BTC:1, ETH:1}};
 let S = {settings:JSON.parse(JSON.stringify(DEF)), days:[], trades:[], lastImport:'', sym:'XAU', tf:'M5'};
 const $ = id => document.getElementById(id);
 
@@ -619,12 +635,112 @@ function ensureWS(feed){
     const bar={t:k.t,o:+k.o,h:+k.h,l:+k.l,c:+k.c}, E=mkt.data.E, last=E[E.length-1];
     if(bar.t===last.t) E[E.length-1]=bar; else if(bar.t>last.t){ E.push(bar); E.shift(); }
     mkt.data.res.ctx.price=bar.c; mkt.lastTick=Date.now(); mkt.dirty=true;
-    if(k.x) setTimeout(loadMarket,1500);       // candle closed: re-run the full analysis
+    if(k.x){ if(S.settings.aiAuto==='close'&&S.settings.aiKey) mkt.autoAI=true; setTimeout(loadMarket,1500); }   // candle closed: re-run the full analysis
   };
   ws.onclose=()=>{ mkt.ws=null; mkt.wsKey=''; if(view==='market') mkt.retry=setTimeout(()=>{ if(mkt.data) ensureWS(mkt.data.feed); },3000); };
 }
+// ---- Live Read: what the Brain is waiting for, recalculated every second on the live candle
+function liveRead(){
+  const d=mkt.data; if(!d) return;
+  const {E,res,sym,tf}=d, c=res.ctx, dp=SYMS[sym].dp, f=v=>v.toFixed(dp);
+  const now=Date.now(), cur=E[E.length-1], left=Math.max(0,Math.round((cur.t+TF_SEC[tf]*1000-now)/1000));
+  $('lrClock').textContent=`candle closes in ${Math.floor(left/60)}:${String(left%60).padStart(2,'0')}`;
+  const closes=E.map(b=>b.c), e21=ema(closes,21), A=atr(E), n=E.length-1, a=A[n-1], prev=E[n-1];
+  const dir=c.t1, isMetal=sym==='XAU'||sym==='XAG';
+  const items=[];
+  const it=(ok,txt)=>items.push(`<div style="display:flex;gap:8px;margin:3px 0"><b class="${ok===true?'up':ok===false?'down':'warn'}" style="width:14px">${ok===true?'✓':ok===false?'✗':'•'}</b><span>${txt}</span></div>`);
+  if(c.regime==='CHAOS'){ $('lrBody').innerHTML='<b class="down">Volatility is extreme — the Brain stands aside until it calms down.</b>'; return; }
+  if(!dir){ it(false,'H1 trend is flat — the pullback setup needs a clear H1 trend first.'); it(null,`D1 ${c.tD>0?'up':c.tD<0?'down':'flat'} · H4 ${c.t4>0?'up':c.t4<0?'down':'flat'}`); $('lrBody').innerHTML=items.join(''); return; }
+  const word=dir>0?'BUY':'SELL';
+  it(true,`H1 trend ${dir>0?'up':'down'} → only looking for ${word}S`);
+  it(c.tD===dir?true:c.tD===-dir?false:null,`D1 ${c.tD===dir?'agrees':c.tD===-dir?'disagrees (−15)':'is flat'}`);
+  it(c.t4===dir?true:c.t4===-dir?false:null,`H4 ${c.t4===dir?'agrees':c.t4===-dir?'disagrees (−10)':'is flat'}`);
+  if(isMetal) it(c.sess==='New York',`Session: ${c.sess}${c.sess==='New York'?' (best tested)':' — NY window is 16:30–20:30 Dubai'}`);
+  it(c.used<0.9,`Daily range used ${Math.round(c.used*100)}%${c.used>=0.9?' — late in the day\'s move (−20)':''}`);
+  let touched=false; for(let k=n-5;k<=n;k++){ if(dir>0&&E[k].l<=e21[k]+0.25*a) touched=true; if(dir<0&&E[k].h>=e21[k]-0.25*a) touched=true; }
+  it(touched,touched?`Pullback reached the EMA21 zone (${f(e21[n])})`:`Waiting for a pullback to the EMA21 zone near ${f(e21[n])} — price is ${f(Math.abs(cur.c-e21[n]))} away`);
+  const trig=dir>0?Math.max(prev.h,e21[n]):Math.min(prev.l,e21[n]);
+  const ok=dir>0?cur.c>trig&&cur.c>cur.o:cur.c<trig&&cur.c<cur.o;
+  if(touched) it(ok?null:false, ok?`Trigger forming: price is ${dir>0?'above':'below'} ${f(trig)} — confirms only if this candle closes there (${Math.floor(left/60)}:${String(left%60).padStart(2,'0')})`:`Trigger: ${word} if a candle closes ${dir>0?'above':'below'} ${f(trig)}`);
+  if(Math.abs(cur.c-cur.o)>1.5*a) it(false,'This candle is very large — chasing it is penalised (moves after big candles tend to reverse slightly).');
+  const near=[[c.pdh,'previous day high'],[c.pdl,'previous day low']].filter(([v])=>Math.abs(cur.c-v)<1.5*a);
+  near.forEach(([v,l])=>it(null,`Near the ${l} ${f(v)} (${f(Math.abs(cur.c-v))} away)`));
+  $('lrBody').innerHTML=items.join('');
+}
+
+// ---- Claude AI analysis (user's own API key, called straight from this phone)
+function aiSafe(v,dp){ const n=parseFloat(v); return isFinite(n)?n.toFixed(dp):'—'; }
+async function askClaude(auto){
+  const s=S.settings, d=mkt.data;
+  if(!s.aiKey){ $('aiBody').innerHTML='Add your Anthropic API key in <b>Settings → Claude AI</b> to use this.'; return; }
+  if(!d||mkt.aiBusy) return;
+  mkt.aiBusy=true; $('aiBtn').disabled=true; $('aiBtn').textContent='Claude is analysing…';
+  $('aiBody').innerHTML='<span class="sub">Reading the chart, levels and context…</span>';
+  const dp=SYMS[d.sym].dp, r=d.res, c=r.ctx, rd=v=>+(+v).toFixed(dp);
+  const bars=(arr,k)=>arr.slice(-k-1,-1).map(b=>[new Date(b.t).toISOString().slice(5,16).replace('T',' '),rd(b.o),rd(b.h),rd(b.l),rd(b.c)]);
+  const bal=balanceNow();
+  const payload={symbol:SYMS[d.sym].label, timeframe:d.tf, utc_now:new Date().toISOString(), live_price:rd(c.price),
+    live_candle:(()=>{const b=d.E[d.E.length-1];return {open:rd(b.o),high:rd(b.h),low:rd(b.l),close:rd(b.c),seconds_left:Math.round((b.t+TF_SEC[d.tf]*1000-Date.now())/1000)};})(),
+    session_utc:c.sess, context:{trend_D1:c.tD,trend_H4:c.t4,trend_H1:c.t1,regime:c.regime,adx_H1:Math.round(c.adxV),efficiency_H1:+c.er.toFixed(2),
+      atr_entry_tf:rd(c.a),volatility_vs_normal:+c.vr.toFixed(2),rsi:Math.round(c.rs),daily_range_used_pct:Math.round(c.used*100),adr:rd(c.adr),
+      prev_day_high:rd(c.pdh),prev_day_low:rd(c.pdl),asia_session_direction:c.asiaDir},
+    rule_engine:{verdict:r.verdict,score:r.score,setup:r.setup||null,note:r.why,factors:r.reasons.map(([p,l])=>`${l} ${p>0?'+':''}${p}`)},
+    tested_facts: d.sym==='XAU'?['GoldEdge NY-session trend pullback 2024-2026: ~55% wins, +0.07R per trade after costs','London-session pullbacks lost money','next-candle direction is ~50/50; after big candles a slight reversal is more likely','price breaks the previous day high 56% of the time when it reaches it']:['no tested statistics for this symbol'],
+    candles_entry_tf_oldest_first:bars(d.E,40), candles_H1_oldest_first:bars(d.H1,24),
+    account:{balance:Math.round(bal),risk_per_trade_pct:+lotFor(bal,s.stop,s.planSym).riskPct.toFixed(2)}};
+  const system=`You are a disciplined, realistic intraday trading analyst for gold, silver and crypto. You see only the data provided: candles, indicators, levels and the results of a rule engine. You have no news feed, so never assume news.
+Rules:
+- Default to WAIT. Say BUY or SELL only if a clear, high-quality setup exists at this moment with a logical stop beyond recent structure and at least 2R of room to the next level.
+- Never claim certainty. "confidence" is your honest probability (0-100) that the trade reaches +1R before the stop; it should rarely exceed 65.
+- Respect the tested facts (do not chase big candles; prefer New York session for gold).
+- For BUY: stop < entry < target1 < target2. For SELL the reverse. target1 = 1R. target2 = 2R-3R.
+- For WAIT, explain the exact condition or price that would make you act ("wait_for").
+Reply with ONLY a JSON object, no other text:
+{"verdict":"BUY|SELL|WAIT","confidence":0,"summary":"one or two sentences","reasons":["short point", "..."],"entry":null,"stop":null,"target1":null,"target2":null,"wait_for":"","risk_note":""}`;
+  try{
+    const resp=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',
+      headers:{'x-api-key':s.aiKey,'anthropic-version':'2023-06-01','content-type':'application/json','anthropic-dangerous-direct-browser-access':'true'},
+      body:JSON.stringify({model:s.aiModel,max_tokens:800,system,messages:[{role:'user',content:JSON.stringify(payload)}]})});
+    const j=await resp.json().catch(()=>({}));
+    if(!resp.ok){ const m=(j.error&&j.error.message)||resp.statusText;
+      throw new Error(resp.status===401?'The API key was rejected — check it in Settings.':resp.status===429?'Rate limit reached — wait a minute and try again.':resp.status===404?'Model not available on your account — pick another model in Settings.':'Claude API error: '+m); }
+    const text=(j.content||[]).map(x=>x.text||'').join('');
+    const m=text.match(/\{[\s\S]*\}/); if(!m) throw new Error('Claude did not return a readable answer. Try again.');
+    const a=JSON.parse(m[0]); renderAI(a,d,j.usage,auto);
+  }catch(err){ $('aiBody').innerHTML=`<span class="down">${esc(err.message||'Could not reach Claude — check your internet.')}</span>`; }
+  mkt.aiBusy=false; $('aiBtn').disabled=false; $('aiBtn').textContent='✦ Ask Claude AI again';
+}
+function renderAI(a,d,usage,auto){
+  const dp=SYMS[d.sym].dp, v=String(a.verdict||'WAIT').toUpperCase(), conf=Math.max(0,Math.min(100,+a.confidence||0));
+  const dir=v==='BUY'?1:v==='SELL'?-1:0, en=+a.entry, st=+a.stop, t1=+a.target1, t2=+a.target2;
+  let levels='', warn='';
+  if(dir){
+    const valid=isFinite(en)&&isFinite(st)&&isFinite(t1)&&(dir>0?st<en&&en<t1:st>en&&en>t1);
+    if(!valid) warn='<div class="sm down">The levels Claude gave are inconsistent — do not use them.</div>';
+    else { const dist=Math.abs(en-st), L=lotFor(balanceNow(),dist,d.sym), cs=L.cs;
+      levels=`<div class="g2" style="margin-top:8px">
+        <div class="box"><div class="lb">Entry</div><div class="vl">${aiSafe(en,dp)}</div></div>
+        <div class="box"><div class="lb">Stop</div><div class="vl down">${aiSafe(st,dp)}</div></div>
+        <div class="box"><div class="lb">Target 1</div><div class="vl up">${aiSafe(t1,dp)}</div></div>
+        <div class="box"><div class="lb">Target 2</div><div class="vl up">${aiSafe(t2,dp)}</div></div>
+        <div class="box full"><div class="lb">Your lot (${L.fixed?'your lot':'auto'})</div><div class="vl">${L.lots.toFixed(2)}</div><div class="sm">risk ${usd(L.risk,2)} (${L.riskPct.toFixed(2)}%) · +${usd(Math.abs(t1-en)*L.lots*cs,2)} at target 1</div></div></div>`; }
+  }
+  const col=dir>0?'--green':dir<0?'--red':'--muted';
+  $('aiBody').innerHTML=`<div style="display:flex;justify-content:space-between;align-items:center"><div class="big" style="color:var(${col})">${esc(v)}</div><span class="pill ${conf>=60?'p-green':conf>=45?'p-amber':'p-grey'}">confidence ${conf}%</span></div>
+    <div class="bar"><div style="width:${conf}%;background:var(${col==='--muted'?'--blue':col})"></div></div>
+    <div style="margin-top:8px;font-size:13px;color:var(--text)">${esc(a.summary||'')}</div>
+    ${Array.isArray(a.reasons)&&a.reasons.length?`<ul style="margin:6px 0 0;padding-left:18px;font-size:12.5px;color:var(--text)">${a.reasons.slice(0,6).map(x=>`<li>${esc(x)}</li>`).join('')}</ul>`:''}
+    ${levels}${warn}
+    ${a.wait_for?`<div class="note"><b>Wait for:</b> ${esc(a.wait_for)}</div>`:''}
+    ${a.risk_note?`<div class="note"><b>Risk:</b> ${esc(a.risk_note)}</div>`:''}
+    <div class="note">AI can be wrong. Use it as a second opinion next to the Brain's score, never on its own.</div>`;
+  $('aiMeta').textContent=`${auto?'auto · ':''}${new Date().toLocaleTimeString(undefined,{hour:'2-digit',minute:'2-digit'})} · ${d.tf}${usage?` · ${usage.input_tokens+usage.output_tokens} tokens`:''}`;
+}
+$('aiBtn').onclick=()=>askClaude(false);
+
 function liveTick(){                            // runs every second while the Market tab is open
   if(!mkt.data) return;
+  liveRead();
   const age=(Date.now()-mkt.lastTick)/1000, live=mkt.ws&&mkt.ws.readyState===1&&age<15;
   $('mktLive').innerHTML=live?`<span class="up">● LIVE</span> · ${esc(mkt.data.src)} · updated ${Math.max(0,Math.round(age))}s ago`:`<span class="warn">● ${mkt.ws&&mkt.ws.readyState===0?'Connecting':'Delayed'}</span> · ${esc(mkt.data.src)} · last full update ${new Date(mkt.data.at).toLocaleTimeString()}`;
   if(mkt.dirty){ mkt.dirty=false; $('chPrice').textContent=mkt.data.res.ctx.price.toFixed(SYMS[mkt.data.sym].dp); drawMarket(); }
@@ -643,11 +759,12 @@ async function loadMarket(){
     if(sym!==S.sym||tf!==S.tf){ mkt.busy=false; return; }
     const res=analyse(sym,d1.k,h4.k,h1.k,e.k);
     const keepLot=$('sigLot')&&document.activeElement===$('sigLot')?$('sigLot').value:null;
-    mkt.data={sym,tf,E:e.k,res,D1:d1.k,src:e.src,feed:{kind:e.kind,pair:e.pair},at:Date.now()};
+    mkt.data={sym,tf,E:e.k,res,D1:d1.k,H1:h1.k,src:e.src,feed:{kind:e.kind,pair:e.pair},at:Date.now()};
     if(!mkt.lastTick) mkt.lastTick=Date.now();
     $('mktSrc').innerHTML='<span id="mktLive"></span>';
     renderSignal(); if(keepLot&&$('sigLot')){ $('sigLot').value=keepLot; sigCalc(res,num(keepLot)); } drawMarket();
     ensureWS(mkt.data.feed); liveTick();
+    if(mkt.autoAI){ mkt.autoAI=false; askClaude(true); }
   }catch(err){
     closeWS(); $('mktSrc').textContent='Could not load live data. Check your internet connection (Binance may be blocked on some networks).';
     $('sigBox').innerHTML='<div class="sig wait"><div class="big">NO DATA</div><div class="note">Live prices are unavailable right now.</div></div>';
@@ -657,7 +774,8 @@ async function loadMarket(){
 function renderSignal(){
   const {sym,res}=mkt.data, dp=SYMS[sym].dp, c=res.ctx, f=v=>v.toFixed(dp);
   const cls=res.verdict==='BUY'?'buy':res.verdict==='SELL'?'sell':'wait';
-  const hist=SYMS[sym].tested?'Historical (gold, NY pullback, 2024–2026, costs in): ~55% wins, +0.07R per trade.':'Not tested on this symbol yet — treat as low confidence.';
+  const hist=mkt.data.tf==='M1'?'M1 is the noisiest timeframe: in the gold data, M1 momentum entries lost money after costs. Treat M1 signals with extra caution. ':'';
+  const hist0=SYMS[sym].tested?'Historical (gold, NY pullback, 2024–2026, costs in): ~55% wins, +0.07R per trade.':'Not tested on this symbol yet — treat as low confidence.';
   let body=`<div style="display:flex;justify-content:space-between;align-items:center;gap:8px"><div class="big" style="color:var(${cls==='buy'?'--green':cls==='sell'?'--red':'--muted'})">${res.verdict}</div>${res.score?`<span class="pill ${res.score>=70?'p-green':res.score>=55?'p-amber':'p-grey'}">score ${res.score}/100</span>`:''}</div>
     <div style="margin-top:4px;font-size:13px">${esc(res.why)}</div>`;
   if(res.verdict!=='WAIT'){
@@ -671,7 +789,7 @@ function renderSignal(){
         <div id="sigCalc" style="margin-top:6px"></div></div></div>`;
   }
   if(res.reasons.length) body+=`<div class="reasons">${res.reasons.map(([p,l])=>`<span class="${p>0?'pos':'neg'}">${esc(l)} ${p>0?'+':''}${p}</span>`).join('')}</div>`;
-  body+=`<div class="note">${hist}</div>`;
+  body+=`<div class="note">${hist}${hist0}</div>`;
   $('sigBox').innerHTML=`<div class="sig ${cls}">${body}</div>`;
   if($('sigLot')){ const upd=()=>sigCalc(res,num($('sigLot').value)); $('sigLot').addEventListener('input',upd); upd(); }
   const T=t=>t>0?'<span class="up">UP</span>':t<0?'<span class="down">DOWN</span>':'<span>FLAT</span>';
@@ -726,7 +844,7 @@ function drawMarket(){
 }
 
 /* ---------- SETTINGS ---------- */
-const SET={setLotMode:'lotMode',setFixedLot:'fixedLot',setDep:'deposit',setGoal:'goal',setDays:'days',setStart:'start',setMode:'mode',setRisk:'risk',setDll:'dll',setMaxT:'maxT',setStop:'stop',setComm:'comm',setPlanSym:'planSym'};
+const SET={setAiKey:'aiKey',setAiModel:'aiModel',setAiAuto:'aiAuto',setLotMode:'lotMode',setFixedLot:'fixedLot',setDep:'deposit',setGoal:'goal',setDays:'days',setStart:'start',setMode:'mode',setRisk:'risk',setDll:'dll',setMaxT:'maxT',setStop:'stop',setComm:'comm',setPlanSym:'planSym'};
 function fillSettings(){
   $('setPlanSym').innerHTML=Object.keys(SYMS).map(k=>`<option value="${k}">${SYMS[k].label}</option>`).join('');
   for(const [id,k] of Object.entries(SET)) $(id).value=k==='fixedLot'?Number(S.settings[k]).toFixed(2):S.settings[k];
@@ -737,7 +855,8 @@ function fillSettings(){
 for(const [id,k] of Object.entries(SET)){
   $(id).addEventListener('change',e=>{
     const v=e.target.value;
-    if(['start','mode','planSym','lotMode'].includes(k)) S.settings[k]=v;
+    if(['start','mode','planSym','lotMode','aiModel','aiAuto'].includes(k)) S.settings[k]=v;
+    else if(k==='aiKey'){ S.settings.aiKey=v.trim(); save(); toast(v.trim()?'API key saved on this phone':'API key removed'); return; }
     else if(k==='fixedLot'){ const n=Math.round(num(v)*100)/100; if(!(n>=0.01)){ e.target.value=S.settings.fixedLot; toast('Lot must be at least 0.01'); return; } S.settings.fixedLot=n; }
     else { const n=parseFloat(v); const bad=!isFinite(n)||n<=0||(k==='days'&&(n>400||n<1))||(k==='goal'&&n<=S.settings.deposit)||(k==='deposit'&&n>=S.settings.goal);
       if(bad){ e.target.value=S.settings[k]; toast(k==='goal'||k==='deposit'?'Goal must be above the deposit':'Enter a valid positive number'); return; }
@@ -751,16 +870,17 @@ $('importBtn').onclick=()=>$('csvFile').click();
 $('csvFile').onchange=e=>{ const f=e.target.files&&e.target.files[0]; e.target.value=''; if(!f) return; const rd=new FileReader();
   rd.onload=()=>{ try{ importJournal(String(rd.result)); }catch(err){ toast(err.message==='format'?'Not a GoldEdge journal CSV':'The file is empty'); } }; rd.readAsText(f); };
 $('addTradeBtn').onclick=addManualTrade;
-$('backupBtn').onclick=()=>{ download(`gold_challenge_backup_${todayIso()}.json`,JSON.stringify(S,null,2),'application/json'); toast('Backup downloaded'); };
+const backupJSON=()=>JSON.stringify({...S,settings:{...S.settings,aiKey:''}},null,2);
+$('backupBtn').onclick=()=>{ download(`gold_challenge_backup_${todayIso()}.json`,backupJSON(),'application/json'); toast('Backup downloaded'); };
 $('restoreBtn').onclick=()=>$('jsonFile').click();
 $('jsonFile').onchange=e=>{ const f=e.target.files&&e.target.files[0]; e.target.value=''; if(!f) return; const rd=new FileReader();
   rd.onload=()=>{ try{ const p=JSON.parse(String(rd.result)); if(!p.settings||!Array.isArray(p.days)) throw 0;
-      S={...S,settings:{...DEF,...p.settings,contract:{...DEF.contract,...p.settings.contract}},days:p.days,trades:p.trades||[],lastImport:p.lastImport||''}; save(); fillSettings(); renderAll(); toast('Backup restored'); }
+      S={...S,settings:{...DEF,...p.settings,aiKey:S.settings.aiKey,contract:{...DEF.contract,...p.settings.contract}},days:p.days,trades:p.trades||[],lastImport:p.lastImport||''}; save(); fillSettings(); renderAll(); toast('Backup restored'); }
     catch(err){ toast('Restore failed — not a Gold Challenge v2 backup'); } }; rd.readAsText(f); };
 $('resetBtn').onclick=()=>{
   $('sheet').innerHTML=`<div class="ttl">Restart the challenge?</div><div class="note">All logged days are cleared and a backup downloads first. Settings and imported trades are kept.</div><div class="g2" style="margin-top:12px"><button class="btn" id="rNo">Cancel</button><button class="btn dng" id="rYes">Restart</button></div>`;
   $('modal').classList.add('open'); $('rNo').onclick=()=>$('modal').classList.remove('open');
-  $('rYes').onclick=()=>{ download(`gold_challenge_backup_${todayIso()}.json`,JSON.stringify(S,null,2),'application/json'); S.days=[]; if(!S.settings.start) S.settings.start=todayIso(); save(); $('modal').classList.remove('open'); fillSettings(); renderAll(); toast('New challenge started'); };
+  $('rYes').onclick=()=>{ download(`gold_challenge_backup_${todayIso()}.json`,backupJSON(),'application/json'); S.days=[]; if(!S.settings.start) S.settings.start=todayIso(); save(); $('modal').classList.remove('open'); fillSettings(); renderAll(); toast('New challenge started'); };
 };
 
 /* ---------- nav, theme, PWA ---------- */

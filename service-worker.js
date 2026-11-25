@@ -1,5 +1,5 @@
 // Gold Challenge service worker: works offline for the app itself; market data always comes live from the network.
-const CACHE = 'gold-challenge-v2.1';
+const CACHE = 'gold-challenge-v2.2';
 const SHELL = ['./', './index.html', './manifest.json', './icon-192.png', './icon-512.png', './icon-maskable-512.png', './apple-touch-icon.png'];
 
 self.addEventListener('install', e => {
